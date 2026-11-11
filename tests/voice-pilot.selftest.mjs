@@ -92,6 +92,8 @@ assert.equal(run('Verify tool task scope',[{statusCode:200,body:{list:{id:'other
 console.log('Authenticated tool gateway scope self-tests passed');
 for(const n of wf.nodes.filter(n=>n.type==='n8n-nodes-base.webhook')) assert.ok(n.webhookId,'Explicit webhook identity required for '+n.name);
 // n8n hides and drops body settings when sendBody is an expression; writes must use a literal true.
+// n8n ends an expression at the first }}, so a body expression may contain {{ and }} only at its ends.
+for(const w of [dot,adfWf]) for(const n of w.nodes){const b=n.parameters.jsonBody; if(typeof b==='string'&&b.startsWith('={{')) assert.ok(!b.slice(3,-2).includes('}}')&&!b.slice(3,-2).includes('{{'),n.name+' body has a nested }} or {{');}
 for(const n of wf.nodes.filter(n=>n.type==='n8n-nodes-base.httpRequest')) assert.notEqual(typeof n.parameters.sendBody,'string',n.name);
 for(const svc of ['ClickUp','WAHA']){
  assert.equal(node(`Execute ${svc} write`).parameters.jsonBody,'={{ $json.data ?? {} }}');
@@ -139,6 +141,18 @@ console.log('Sender lists match people.json');
 {const send=chatId=>tool({service:'waha',method:'POST',path:'/api/sendText',data:{session:'default',chatId,text:'hi'}}).reject;
  assert.equal(send('120363012345678901@g.us'),undefined); assert.equal(send('120363012345678901@c.us'),true); assert.equal(send('x@g.us'),true); assert.equal(send(people[0].ids[0]),undefined);}
 console.log('Group prefix commands self-tests passed');
+// Mentioning the bot in a group sends a normal message to the AI; the mention is removed.
+{const G='120363012345678901@g.us', lid=people[0].ids[1];
+ const gev=(body,extra={})=>[{body:{event:'message',session:'default',payload:{from:G,participant:lid,fromMe:false,id:`false_${G}_3EB0ABCDEF333333_${lid}`,hasMedia:false,body,...extra}}}];
+ for(const at of ['@73710631411953','@6281119903888']){
+  const r=run('Validate test message',gev(at+' please remind Victor to send the samples tomorrow'))[0].json;
+  assert.equal(r.freeText,true,at); assert.equal(r.replyTo,G); assert.ok(r.messageId.startsWith('false_'+G+'_'));}
+ assert.equal(run('Validate test message',gev('@73710631411953 task: Deck @victor'))[0].json.title,'Deck');
+ assert.equal(run('Validate test message',gev('@737106314119539 please remind Victor tomorrow'))[0].json.ignored,true,'another number is not the bot');
+ assert.equal(run('Validate test message',gev('@73710631411953 thanks'))[0].json.ignored,true,'too short for the AI');
+ assert.equal(run('Validate test message',gev('@73710631411953',{hasMedia:true,media:{mimetype:'audio/ogg'}}))[0].json.ignored,true);
+ assert.equal(run('Use message text',[{fromMe:false,body:'@73710631411953 please remind Victor'}])[0].json.text,'please remind Victor');}
+console.log('Group bot-mention self-tests passed');
 // WhatsApp formatting around a prefix, and multi-line tasks (title, then notes or links).
 {const t=b=>run('Validate test message',ev(b))[0].json;
  const fig='https://www.figma.com/proto/xpJYeRKJ5TSkUjr2SXfKls/AMA-DA-FLOW?node-id=10-41&t=MThELgQ4RH8C6O7z-0&scaling=scale-down&content-scaling=fixed&page-id=5%3A36';

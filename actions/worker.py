@@ -615,17 +615,20 @@ def application(store, runner, api_key):
                     if not person or not re.fullmatch(r'WAHA pilot message [A-Za-z0-9-]{8,128}',reference):
                         raise ValueError('Invalid sender or message')
                     reply_to = body.get('replyTo')
-                    if reply_to is not None and (not isinstance(reply_to,str) or not re.fullmatch(r'[0-9-]{5,40}@g\.us',reply_to) or body.get('messageId')):
+                    # A group message may carry a messageId only as a plain-text AI job (the bot was mentioned).
+                    if reply_to is not None and (not isinstance(reply_to,str) or not re.fullmatch(r'[0-9-]{5,40}@g\.us',reply_to) or (body.get('messageId') and body.get('freeText') is not True)):
                         raise ValueError('Invalid group')
                     if body.get('messageId') and 'action' not in body:
                         message_id = body['messageId']
-                        if not isinstance(message_id,str) or len(message_id)>250 or not message_id.startswith('false_' + chat + '_'):
+                        if not isinstance(message_id,str) or len(message_id)>250 or not message_id.startswith('false_' + (reply_to or chat) + '_'):
                             raise ValueError('Invalid voice reference')
                         payload = {'action':'voice','messageId':message_id}
                         if body.get('freeText') is True:
                             payload['freeText'] = True
-                        if body.get('workspace') == 'adf' and runner.adf_ok(person, chat):
+                        if (body.get('workspace') == 'adf' or runner.groups.get(reply_to) == ADF_LIST_ID) and runner.adf_ok(person, reply_to or chat):
                             payload['adf'] = True
+                        if reply_to:
+                            payload['listId'] = runner.groups.get(reply_to, LIST_ID)
                     elif body.get('action') in ('confirm','retry'):
                         payload = {'action':body['action'],'answer':body.get('answer'),'code':body.get('code','').lower()}
                         if (payload['action'] == 'confirm' and payload['answer'] not in ('yes','no')) or not re.fullmatch(r'[a-f0-9]{0,32}',payload['code']):

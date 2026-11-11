@@ -283,6 +283,20 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(self.store.get(row['id'])['payload']['listId'],worker.LIST_ID)
         finally:
             worker.NO_ADF_GROUPS.discard('120363077777777777@g.us')
+    def test_group_mention_becomes_ai_job_for_that_group(self):
+        import worker
+        g='120363099999999999@g.us'
+        status,row=self.post('/submit',{'chatId':'phone','replyTo':g,'reference':'WAHA pilot message MENTION12345','messageId':'false_'+g+'_MENTION12345_phone','freeText':True})
+        self.assertEqual(status,200)
+        a=self.store.get(row['id']); self.assertEqual((a['chat'],a['payload']['listId'],a['payload'].get('adf')),(g,'901',None))
+        self.assertEqual(self.post('/submit',{'chatId':'phone','replyTo':g,'reference':'WAHA pilot message MENTION67890','messageId':'false_other@g.us_MENTION67890'})[0],400)
+        self.assertEqual(self.post('/submit',{'chatId':'phone','replyTo':g,'reference':'WAHA pilot message MENTIONVOICE','messageId':'false_'+g+'_MENTIONVOICE_phone'})[0],400)
+        self.runner.groups['120363088888888888@g.us']=worker.ADF_LIST_ID
+        status,row=self.post('/submit',{'chatId':'phone','replyTo':'120363088888888888@g.us','reference':'WAHA pilot message MENTIONADF12','messageId':'false_120363088888888888@g.us_MENTIONADF12_phone','freeText':True})
+        a=self.store.get(row['id']); self.assertTrue(a['payload']['adf'])
+        self.store.patch(a['id'],token='t',state='extracting')
+        self.assertEqual(self.post('/plan',{'jobId':a['id'],'token':'t','plan':{'action':'save_idea','title':'x','description':''}})[0],200)
+        self.assertEqual(self.store.get(a['id'])['payload']['listId'],worker.ADF_LIST_ID)
     def test_confirmations_cannot_be_bypassed_with_retry(self):
         a=self.store.submit('person','phone','pending',{'action':'create_task','title':'Deck','assignees':['Victor']})
         self.runner.run_once()

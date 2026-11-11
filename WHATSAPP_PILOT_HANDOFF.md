@@ -113,7 +113,7 @@ To add a group:
 
 Group senders must still be in `people.json`.
 
-Current mapping: ghibah nusantara, AmaDaFlow MARKETING team, Website + Ai and ADF - team workflow use Ama Da Flow (`1100380000193567`, workspace `1100380000030289`). IJV (formerly Test) uses `1100310000205713`. DotCross and private chats use Voice Inbox.
+Current mapping: four Ama Da Flow groups (see `actions/groups.json`) use Ama Da Flow (`1100380000193567`, workspace `1100380000030289`). IJV (formerly Test) uses `1100310000205713`. DotCross and private chats use Voice Inbox.
 
 **#adf override.** In any chat, `#adf` anywhere in a message sends it to Ama Da Flow (`CLICKUP_ADF_LIST_ID`), and the tag is removed from the text. For voice notes and plain text, the AI also returns `"workspace":"adf"` when the speaker says the request is for Ama Da Flow. AI requests are always previewed, and the preview shows `List: Ama Da Flow`. Without `#adf`, progress on an Ama Da Flow task link from a Voice Inbox chat is rejected with a hint to add `#adf`.
 
