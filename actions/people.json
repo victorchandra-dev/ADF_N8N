@@ -142,5 +142,16 @@
       "save_idea",
       "post_progress"
     ]
+  },
+  {
+    "ids": [
+      "6281311922662@c.us",
+      "114147748491460@lid"
+    ],
+    "actions": [
+      "create_task",
+      "save_idea",
+      "post_progress"
+    ]
   }
 ]
