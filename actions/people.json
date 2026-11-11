@@ -153,5 +153,17 @@
       "save_idea",
       "post_progress"
     ]
+  },
+  {
+    "ids": [
+      "628118122407@c.us",
+      "247690931781823@lid"
+    ],
+    "noAdf": true,
+    "actions": [
+      "create_task",
+      "save_idea",
+      "post_progress"
+    ]
   }
 ]
