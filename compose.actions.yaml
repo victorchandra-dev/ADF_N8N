@@ -1,0 +1,37 @@
+services:
+  actions:
+    image: python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
+    command: [python, -B, /app/worker.py]
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file: .waha-key
+    environment:
+      TZ: Asia/Jakarta
+      ACTION_DATA: /data
+      PEOPLE_FILE: /app/people.json
+      GROUPS_FILE: /app/groups.json
+      N8N_URL: http://n8n:5678
+      CLICKUP_LIST_ID: "1100310000198006"
+      CLICKUP_ADF_LIST_ID: "1100380000193567"
+      # "true" sends Ama Da Flow requests to Voice Inbox until the ClickUp token can reach that workspace.
+      CLICKUP_ADF_PAUSED: "false"
+      # IJV never goes to Ama Da Flow, even with #adf.
+      CLICKUP_NO_ADF_GROUPS: "120363411982534587@g.us"
+    volumes:
+      - ./actions/worker.py:/app/worker.py:ro
+      - ./actions/people.json:/app/people.json:ro
+      - ./actions/groups.json:/app/groups.json:ro
+      - ./actions-data:/data
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: none

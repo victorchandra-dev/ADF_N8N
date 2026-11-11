@@ -1,0 +1,32 @@
+services:
+  n8n:
+    environment:
+      N8N_DEFAULT_BINARY_DATA_MODE: default
+    networks:
+      - default
+      - voice
+  whisper:
+    # Reuse the installed Debian image for its FFmpeg runtime.
+    image: devlikeapro/waha:gows
+    entrypoint: [/whisper/whisper-server]
+    command: [--host, 0.0.0.0, --model, /models/ggml-base.bin, --language, auto, --threads, "2", --no-gpu, --convert, --tmp-dir, /tmp]
+    restart: unless-stopped
+    read_only: true
+    mem_limit: 2g
+    user: "65534:65534"
+    cap_drop: [ALL]
+    environment:
+      LD_LIBRARY_PATH: /whisper
+    volumes:
+      - ./whisper-models:/models:ro
+      - ./whisper-runtime/whisper-bin-ubuntu-x64:/whisper:ro
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    logging:
+      driver: none
+    networks:
+      - voice
+
+networks:
+  voice:
+    internal: true

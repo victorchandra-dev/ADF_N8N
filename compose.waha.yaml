@@ -1,0 +1,31 @@
+services:
+  waha:
+    image: devlikeapro/waha:gows
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5679:3000"
+    env_file: .waha.env
+    environment:
+      TZ: Asia/Jakarta
+      WHATSAPP_DEFAULT_ENGINE: GOWS
+      WAHA_BASE_URL: http://waha:3000
+      WAHA_PUBLIC_URL: http://127.0.0.1:5679
+      WAHA_PRINT_QR: "false"
+      WAHA_LOG_LEVEL: warn
+      WHATSAPP_SWAGGER_ENABLED: "false"
+      WAHA_GOWS_DEVICE_REQUIRE_FULL_SYNC: "false"
+      WAHA_SESSION_CONFIG_IGNORE_GROUPS: "false"
+      WAHA_SESSION_CONFIG_IGNORE_STATUS: "true"
+      WAHA_SESSION_CONFIG_IGNORE_CHANNELS: "true"
+      WAHA_SESSION_CONFIG_IGNORE_BROADCAST: "true"
+      WAHA_EVENTS_DOWNLOAD_MEDIA: "false"
+      WAHA_API_DOWNLOAD_MEDIA: "false"
+      WHATSAPP_FILES_FOLDER: /tmp/whatsapp-files
+      WHATSAPP_FILES_LIFETIME: "180"
+    volumes:
+      - waha_sessions:/app/.sessions
+    tmpfs:
+      - /tmp/whatsapp-files:size=64m,mode=1777
+
+volumes:
+  waha_sessions:
