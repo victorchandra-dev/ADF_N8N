@@ -94,6 +94,16 @@ class FlowTests(unittest.TestCase):
         self.runner.run_once(); self.runner.run_once()
         self.assertEqual(len(self.api.comments),0)
         self.assertEqual(self.store.get(a['id'])['state'],'attention')
+    def test_ama_da_flow_tasks_may_be_in_any_space_list(self):
+        import worker
+        person=next(iter(self.runner.people.values()))['person']
+        action={'person':person,'payload':{'listId':worker.ADF_LIST_ID}}
+        old=worker.ADF_TASK_LISTS; worker.ADF_TASK_LISTS={worker.ADF_LIST_ID,'website'}
+        try:
+            self.assertEqual(self.runner.in_scope(action,{'id':'t','list':{'id':'website'}})['id'],'t')
+            with self.assertRaises(worker.APIError): self.runner.in_scope(action,{'id':'t','list':{'id':'support'}})
+            with self.assertRaises(worker.APIError): self.runner.in_scope({'person':person,'payload':{'listId':worker.LIST_ID}},{'id':'t','list':{'id':'website'}})
+        finally: worker.ADF_TASK_LISTS=old
     def test_pending_payload_is_actually_removed_at_expiry(self):
         a=self.add({'action':'create_task','title':'Private proposal','assignees':['Victor']})
         self.runner.run_once(); self.store.patch(a['id'],expires=1)
@@ -313,6 +323,15 @@ class GatewayTests(unittest.TestCase):
         api.get_task('901','86abc123'); api.get_comments('901','86abc123'); api.comment('901','86abc123','hi')
         api.status('901','86abc123','complete'); api.members('901'); api.create('901',{}); api.tasks('901')
         self.assertEqual([d['list'] for d in sent],['901']*7)
+    def test_gateway_scope_refusal_is_not_a_connection_error(self):
+        from worker import API, APIError
+        api=API.__new__(API); api.n8n='http://n8n'; api.waha_key='k'
+        api.request=lambda *a,**k: {'statusCode':403,'body':{'error':'task_outside_scope'}}
+        with self.assertRaises(APIError) as caught: api.get_task('901','86abc123')
+        self.assertEqual((caught.exception.code,caught.exception.retryable),('task_outside_scope',False))
+        api.request=lambda *a,**k: {'statusCode':403,'body':{'error':'operation_not_allowed'}}
+        with self.assertRaises(APIError) as caught: api.get_task('901','86abc123')
+        self.assertEqual(caught.exception.code,'http_403')
     def test_each_workspace_uses_its_own_workflow(self):
         import worker
         from worker import API

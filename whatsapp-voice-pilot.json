@@ -519,7 +519,7 @@
         960
       ],
       "parameters": {
-        "jsCode": "const response = $input.first().json;\nif (response.statusCode !== 200) return [{json:{reject:true,response}}];\nif (response.body?.list?.id !== $('Validate tool request').first().json.list) return [{json:{reject:true,response:{statusCode:403,body:{error:'task_outside_scope'}}}}];\nreturn [{json:$('Validate tool request').first().json}];"
+        "jsCode": "const response = $input.first().json;\nconst SPACE = [\"1100380000200435\", \"1100380000175776\", \"1100380000175778\", \"1100380000175779\", \"1100380000175780\", \"1100380000207203\", \"1100380000175781\", \"1100380000175782\", \"1100380000193973\", \"1100380000175783\", \"1100380000175784\", \"1100380000175785\", \"1100380000175792\", \"1100380000175793\", \"1100380000194069\", \"1100380000194005\", \"1100380000206370\"]; // Ama Da Flow: an existing task may be in any list of the space except Help & Support\nif (response.statusCode !== 200) return [{json:{reject:true,response}}];\nconst scope = $('Validate tool request').first().json.list;\nif (!(SPACE.includes(scope) ? SPACE : [scope]).includes(response.body?.list?.id)) return [{json:{reject:true,response:{statusCode:403,body:{error:'task_outside_scope'}}}}];\nreturn [{json:$('Validate tool request').first().json}];"
       }
     },
     {

@@ -16,6 +16,9 @@ services:
       N8N_URL: http://n8n:5678
       CLICKUP_LIST_ID: "1100310000198006"
       CLICKUP_ADF_LIST_ID: "1100380000200435"
+      # Lists whose existing tasks Ama Da Flow chats may update: the whole space except Help & Support. New tasks still go to CLICKUP_ADF_LIST_ID.
+      # Also set in SPACE in the Ama Da Flow workflow's "Verify tool task scope".
+      CLICKUP_ADF_TASK_LISTS: "1100380000200435,1100380000175776,1100380000175778,1100380000175779,1100380000175780,1100380000207203,1100380000175781,1100380000175782,1100380000193973,1100380000175783,1100380000175784,1100380000175785,1100380000175792,1100380000175793,1100380000194069,1100380000194005,1100380000206370"
       # "true" sends Ama Da Flow requests to Voice Inbox until the ClickUp token can reach that workspace.
       CLICKUP_ADF_PAUSED: "false"
       # IJV never goes to Ama Da Flow, even with #adf.

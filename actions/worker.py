@@ -19,6 +19,8 @@ from pathlib import Path
 
 LIST_ID = os.getenv('CLICKUP_LIST_ID', '1100310000198006')
 ADF_LIST_ID = os.getenv('CLICKUP_ADF_LIST_ID', '1100380000200435')
+# Lists whose existing tasks Ama Da Flow chats may update; new tasks and name searches stay in ADF_LIST_ID.
+ADF_TASK_LISTS = set(filter(None, os.getenv('CLICKUP_ADF_TASK_LISTS', '').split(','))) | {ADF_LIST_ID}
 # While paused, everything meant for Ama Da Flow goes to LIST_ID instead (e.g. no ClickUp access yet).
 ADF_PAUSED = os.getenv('CLICKUP_ADF_PAUSED') == 'true'
 # Groups whose requests never go to Ama Da Flow, even with #adf. People get "noAdf": true in people.json.
@@ -206,6 +208,8 @@ class API:
             hook = 'waha-action-tool' if list_id == ADF_LIST_ID else 'waha-action-tool-dotcross'
         result = self.request('POST', self.n8n + '/webhook/' + hook, {'service':service,'method':method,'path':path,'data':data,'list':list_id}, {'X-Api-Key':self.waha_key})
         status = result.get('statusCode', 502)
+        if status == 403 and (result.get('body') or {}).get('error') == 'task_outside_scope':
+            raise APIError('task_outside_scope')  # The gateway found the task in another list; a retry cannot help.
         if not isinstance(status, int) or not 200 <= status < 300:
             raise APIError('http_' + str(status), retryable=status == 429 or status >= 500, ambiguous=method != 'GET' and status >= 500)
         return result.get('body') or {}
@@ -301,7 +305,8 @@ class Runner:
 
     def in_scope(self, action, task):
         person = self.person(action)
-        if task.get('list', {}).get('id') != self.list_id(action) or (person.get('taskIds') is not None and task.get('id') not in person['taskIds']):
+        allowed = ADF_TASK_LISTS if self.list_id(action) == ADF_LIST_ID else {self.list_id(action)}
+        if task.get('list', {}).get('id') not in allowed or (person.get('taskIds') is not None and task.get('id') not in person['taskIds']):
             raise APIError('task_outside_scope')
         return task
 
@@ -535,7 +540,7 @@ class Runner:
             'task_not_found': 'I could not find that task in this list. Send progress: <task link> <update>.',
             'task_ambiguous': 'More than one task matches. Send progress: <task link> <update>.',
             'update_missing': 'Include the progress update after the task link or name.',
-            'task_outside_scope': 'That task is outside the list for this chat. Add #adf for an Ama Da Flow task.',
+            'task_outside_scope': 'That task is outside the list for this chat, so I cannot change it. Update it in ClickUp, or add #adf for an Ama Da Flow task.',
             'status_changed_since_request': 'The progress comment is saved. The task status changed since your request, so please send a fresh status request.',
         }
         message = messages.get(error.code, ('Your comment is saved. ' if partial else '') + 'I could not finish request ' + action['id'][:10] + '. Reply retry ' + action['id'][:10] + ' after the connection or permissions are restored.')

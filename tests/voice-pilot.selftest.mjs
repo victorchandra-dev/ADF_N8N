@@ -182,9 +182,13 @@ console.log('Dotcross #adf hand-off self-tests passed');
  const adfList=/CLICKUP_ADF_LIST_ID: "(\d+)"/.exec(fs.readFileSync(new URL('../compose.actions.yaml',import.meta.url),'utf8'))[1];
  const adfGroups=Object.keys(groups).filter(g=>String(groups[g])===adfList).sort();
  const pick=(w,name)=>w.nodes.find(n=>n.name===name).parameters.jsCode;
- const strip=js=>js.replace(/const (ROUTE|LISTS|ADF_LISTS|BOT) = [^\n]*/g,'').replace(/'(personal|default)'|\/api\/(personal|default)\/|\\\/api\\\/(personal|default)\\\//g,'SESSION');
+ const strip=js=>js.replace(/const (ROUTE|LISTS|ADF_LISTS|SPACE|BOT) = [^\n]*/g,'').replace(/'(personal|default)'|\/api\/(personal|default)\/|\\\/api\\\/(personal|default)\\\//g,'SESSION');
  for(const name of ['Validate test message','Validate tool request','Use message text','Validate WAHA media URL','Voice job','Verify tool task scope'])
   assert.equal(strip(pick(adfWf,name)),strip(pick(dot,name)),name+' must match between workflows');
+ {const v=(task,scope)=>new Function('$input','$',pick(adfWf,'Verify tool task scope'))({first:()=>({json:{statusCode:200,body:{list:{id:task}}}})},()=>({first:()=>({json:{ok:1,list:scope}})}))[0].json;
+  assert.equal(v('1100380000175792','1100380000200435').ok,1,'ADF may update a Website task');
+  assert.equal(v('1100380000210276','1100380000200435').reject,true,'ADF may not touch Support Tickets');}
+ assert.deepEqual(JSON.parse(/const SPACE = (\[[^\]]*\])/.exec(pick(adfWf,'Verify tool task scope'))[1]).sort(),/CLICKUP_ADF_TASK_LISTS: "([\d,]+)"/.exec(fs.readFileSync(new URL('../compose.actions.yaml',import.meta.url),'utf8'))[1].split(',').sort(),'SPACE must match CLICKUP_ADF_TASK_LISTS');
  assert.deepEqual(JSON.parse(/const ADF_GROUPS = (\[[^\]]*\])/.exec(pick(dot,'Validate test message'))[1]),adfGroups,'ADF_GROUPS must match groups.json');
  const lid=people[0].ids[1];
  const gev=(G,body,session)=>[{body:{event:'message',session,payload:{from:G,participant:lid,fromMe:false,id:`false_${G}_3EB0ABCDEF555555_${lid}`,hasMedia:false,body}}}];
