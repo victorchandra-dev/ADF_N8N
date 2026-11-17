@@ -15,11 +15,17 @@ services:
       GROUPS_FILE: /app/groups.json
       N8N_URL: http://n8n:5678
       CLICKUP_LIST_ID: "1100310000198006"
-      CLICKUP_ADF_LIST_ID: "1100380000193567"
+      CLICKUP_ADF_LIST_ID: "1100380000200435"
       # "true" sends Ama Da Flow requests to Voice Inbox until the ClickUp token can reach that workspace.
       CLICKUP_ADF_PAUSED: "false"
       # IJV never goes to Ama Da Flow, even with #adf.
       CLICKUP_NO_ADF_GROUPS: "120363411982534587@g.us"
+      # Live agent. Set both before adding the live WAHA webhook: while empty, a handoff pauses the bot and notifies nobody.
+      # Also set them in whatsapp-live-agent.json (SUPPORT_GROUP, LISTS) and both task intakes (SUPPORT_GROUPS).
+      SUPPORT_GROUP: "120363411385210079@g.us"
+      SUPPORT_LIST_ID: "1100380000210276"
+      # Bot answers per customer per 24 hours before a person takes over.
+      SUPPORT_DAILY: "30"
     volumes:
       - ./actions/worker.py:/app/worker.py:ro
       - ./actions/people.json:/app/people.json:ro

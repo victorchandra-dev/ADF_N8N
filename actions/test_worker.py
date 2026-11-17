@@ -209,11 +209,12 @@ class FakeAPI:
         from worker import APIError
         if self.fail_status: raise APIError('rate_limited',retryable=True)
         self.task['status']['status']=status
-    def send(self, chat_id, text):
+    def send(self, chat_id, text, live=False, session='default'):
         from worker import APIError
         if self.fail_reply: raise APIError('unavailable',retryable=True)
         self.sent.append((chat_id,text)); return {'id':'sent1'}
-    def reply_exists(self, chat_id, text, since): return False
+    def reply_exists(self, chat_id, text, since, session='default'): return False
+    def support_job(self, action, token): self.jobs=getattr(self,'jobs',[])+[(action['id'],token)]
 
 class HTTPTests(unittest.TestCase):
     def setUp(self):
@@ -317,10 +318,10 @@ class GatewayTests(unittest.TestCase):
         from worker import API
         api=API.__new__(API); api.n8n='http://n8n'; api.waha_key='k'; urls=[]
         api.request=lambda m,u,d=None,h=None: urls.append(u) or {'statusCode':200,'body':{}}
-        api.members(worker.ADF_LIST_ID); api.members(worker.LIST_ID); api.send('phone','hi')
+        api.members(worker.ADF_LIST_ID); api.members(worker.LIST_ID); api.send('phone','hi'); api.send('phone','hi',session='personal')
         job=lambda adf: {'id':'x','chat':'phone','reference':'r','payload':{'messageId':'m',**({'adf':True} if adf else {})}}
         api.extract(job(True),{'actions':[]},'t'); api.extract(job(False),{'actions':[]},'t')
-        self.assertEqual([u.rsplit('/',1)[1] for u in urls],['waha-action-tool','waha-action-tool-dotcross','waha-action-tool-dotcross','waha-voice-action-worker','waha-voice-action-worker-dotcross'])
+        self.assertEqual([u.rsplit('/',1)[1] for u in urls],['waha-action-tool','waha-action-tool-dotcross','waha-action-tool','waha-action-tool-dotcross','waha-voice-action-worker','waha-voice-action-worker-dotcross'])
 
 
 if __name__ == '__main__':
@@ -330,11 +331,35 @@ class PlainTextTests(HTTPTests):
     def plan(self, plan, ref='ABCDEF123456'):
         status,row=self.post('/submit',{'chatId':'phone','reference':'WAHA pilot message '+ref,'messageId':'false_phone_'+ref,'freeText':True})
         self.assertEqual(status,200)
-        a=self.store.get(row['id']); self.assertEqual(a['payload'],{'action':'voice','messageId':'false_phone_'+ref,'freeText':True})
+        a=self.store.get(row['id']); self.assertEqual(a['payload'],{'action':'voice','messageId':'false_phone_'+ref,'freeText':True,'session':'default'})
         self.store.patch(a['id'],token='t',state='extracting')
         self.assertEqual(self.post('/plan',{'jobId':a['id'],'token':'t','plan':plan})[0],200)
         self.runner.run_once()
         return self.store.get(a['id'])
+
+    def test_replies_come_from_the_number_that_received_the_message(self):
+        sent=[]
+        self.runner.api.send=lambda chat,text,live=False,session='default': sent.append(session)
+        status,row=self.post('/submit',{'chatId':'phone','session':'personal','reference':'WAHA pilot message PERS0000001','messageId':'false_phone_PERS0000001','freeText':True})
+        self.assertEqual(status,200)
+        a=self.store.get(row['id']); self.assertEqual(a['payload']['session'],'personal')
+        self.store.patch(a['id'],token='t',state='extracting')
+        # The Dotcross number never hands a job to Ama Da Flow.
+        self.assertEqual(self.post('/handoff',{'jobId':a['id'],'token':'t'}),(200,{'accepted':True,'handoff':False}))
+        self.assertEqual(self.post('/plan',{'jobId':a['id'],'token':'t','plan':{'action':'create_task','title':'Deck'}})[0],200)
+        self.assertEqual(self.store.get(a['id'])['payload']['session'],'personal')
+        self.runner.run_once()
+        while self.runner.send_once(): pass
+        self.assertTrue(sent); self.assertEqual(set(sent),{'personal'})
+        # A yes on the Ama Da Flow number does not confirm a request waiting on the Dotcross number.
+        self.assertEqual(self.store.get(a['id'])['state'],'pending')
+        self.post('/submit',{'chatId':'phone','session':'default','reference':'WAHA pilot message PERS0000003','action':'confirm','answer':'yes','code':''})
+        self.runner.run_once()
+        self.assertEqual(self.store.get(a['id'])['state'],'pending')
+        self.post('/submit',{'chatId':'phone','session':'personal','reference':'WAHA pilot message PERS0000004','action':'confirm','answer':'yes','code':''})
+        self.runner.run_once()
+        self.assertNotEqual(self.store.get(a['id'])['state'],'pending')
+        self.assertEqual(self.post('/submit',{'chatId':'phone','session':'other','reference':'WAHA pilot message PERS0000002','action':'clarify','replyText':'x'})[0],400)
     def outbox(self):
         with self.store.db() as db: return [r['text'] for r in db.execute('SELECT text FROM outbox ORDER BY created')]
     def test_ignore_ends_silently(self):
@@ -439,7 +464,7 @@ class GroupReplyTests(HTTPTests):
         _,a=self.submit({'action':'create_task','title':'Deck','tags':[],'assignees':[],'workspace':'adf'})
         _,b=self.submit({'ref':'PRIVATE12345','action':'create_task','title':'Plain','tags':[],'assignees':[]})
         self.runner.run_once(); self.runner.run_once()
-        self.assertEqual([t['list']['id'] for t in self.runner.api.created],['1100380000193567','1100310000198006'])
+        self.assertEqual([t['list']['id'] for t in self.runner.api.created],['1100380000200435','1100310000198006'])
     def test_ai_workspace_routes_and_shows_list_in_preview(self):
         from worker import ADF_LIST_ID
         _,row=self.submit({'messageId':'false_phone_AIJOB1234567','freeText':True})
@@ -461,3 +486,157 @@ class GroupReplyTests(HTTPTests):
         finally:
             worker.ADF_PAUSED=False
 
+
+
+class SupportTests(HTTPTests):
+    GROUP='120363000000000001@g.us'
+    def setUp(self):
+        from unittest import mock
+        super().setUp()
+        for name,value in (('SUPPORT_GROUP',self.GROUP),('SUPPORT_LIST_ID','777'),('SUPPORT_DEBOUNCE',0)):
+            patcher=mock.patch('worker.'+name,value); patcher.start(); self.addCleanup(patcher.stop)
+    def customer(self,key='MSG00000001',text='where is my order?',chat='6281200000001@c.us'):
+        return self.post('/support/inbound',{'type':'customer','chatId':chat,'messageKey':key,'text':text})
+    def job(self):
+        self.runner.run_once()
+        return next(a for a in all_actions(self.store) if a['kind']=='support' and a['state']=='extracting')
+    def answer(self,a,**answer):
+        return self.post('/support/reply',{'jobId':a['id'],'token':a['token'],'answer':{'reply':'Hi!','handoff':False,**answer}})
+    def outbox(self):
+        with self.store.db() as db: return [(r['chat'],r['text']) for r in db.execute('SELECT chat,text FROM outbox ORDER BY created,rowid')]
+    def support(self,chat='6281200000001@c.us'):
+        with self.store.db() as db: return dict(db.execute('SELECT * FROM support WHERE chat=?',(chat,)).fetchone())
+    def handoff(self):
+        self.customer(); a=self.job()
+        self.assertEqual(self.answer(a,reply='Connecting you to our team.',handoff=True,summary='Refund for damaged item',reason='refund',priority='high',transcript='customer: it arrived torn')[0],200)
+        self.runner.run_once()
+        return self.support()['code']
+    def test_staff_and_bad_ids_are_not_customers(self):
+        self.assertEqual(self.customer(chat='phone')[0],400)
+        self.assertEqual(self.customer(chat='120363000000000001@g.us')[0],400)
+        self.assertEqual(self.customer(key='bad')[0],400)
+    def test_burst_gets_one_job_and_a_reply(self):
+        self.customer('MSG00000001'); self.customer('MSG00000002')
+        self.assertEqual(len([a for a in all_actions(self.store) if a['kind']=='support']),1)
+        a=self.job()
+        self.assertEqual(self.answer(a)[0],200)
+        self.assertEqual(self.answer(a)[0],409)
+        self.assertEqual(self.outbox(),[('6281200000001@c.us','Hi!')])
+    def test_invalid_model_output_is_rejected(self):
+        self.customer(); a=self.job()
+        self.assertEqual(self.post('/support/reply',{'jobId':a['id'],'token':a['token'],'answer':{'reply':'x','handoff':'yes'}})[0],400)
+        self.assertEqual(self.answer(a,reply='x'*1501)[0],400)
+        self.assertEqual(self.answer(a,handoff=True)[0],400)  # handoff needs a summary
+    def test_handoff_tells_customer_creates_ticket_and_notifies_group(self):
+        code=self.handoff()
+        self.assertEqual(self.support()['state'],'waiting')
+        task=self.runner.api.created[0]
+        self.assertEqual(task['list']['id'],'777'); self.assertIn('it arrived torn',task['description']); self.assertTrue(task['description'].endswith('Support ticket '+code))
+        out=self.outbox()
+        self.assertEqual(out[0],('6281200000001@c.us','Connecting you to our team.\n\nRef: '+code))
+        self.assertEqual(out[1][0],self.GROUP); self.assertIn('Ticket '+code,out[1][1]); self.assertIn('https://app.clickup.com/t/new123456',out[1][1]); self.assertIn('wa.me/6281200000001',out[1][1])
+        ticket=next(a for a in all_actions(self.store) if a['kind']=='ticket_open')
+        self.assertEqual(ticket['payload'],{})  # transcript only kept in ClickUp
+    def test_lid_ticket_shows_the_phone_n8n_resolved(self):
+        lid='123456789012345@lid'
+        self.customer(chat=lid); a=self.job()
+        reply=lambda phone: self.post('/support/reply',{'jobId':a['id'],'token':a['token'],'phone':phone,'answer':{'reply':'Connecting you.','handoff':True,'summary':'Wants a person','reason':'customer_asked','priority':'normal','transcript':''}})
+        self.assertEqual(reply('+6281200000001')[0],200)
+        self.runner.run_once()
+        notice=[t for c,t in self.outbox() if c==self.GROUP][0]
+        self.assertIn('+6281200000001 https://wa.me/6281200000001',notice)
+        self.assertIn('wa.me/6281200000001',self.runner.api.created[0]['description'])
+    def test_lid_ticket_without_a_phone_says_so(self):
+        lid='123456789012345@lid'
+        self.customer(chat=lid); a=self.job()
+        self.assertEqual(self.post('/support/reply',{'jobId':a['id'],'token':a['token'],'phone':'not a phone','answer':{'reply':'Connecting you.','handoff':True,'summary':'Wants a person','reason':'customer_asked','priority':'normal','transcript':''}})[0],200)
+        self.runner.run_once()
+        self.assertIn('WhatsApp user 123456789012345',[t for c,t in self.outbox() if c==self.GROUP][0])
+        self.assertIsNone(self.support(lid)['phone'])
+    def test_bot_stays_quiet_while_agents_handle_the_ticket(self):
+        code=self.handoff()
+        self.customer('MSG00000009','here is the photo')
+        self.assertFalse([a for a in all_actions(self.store) if a['kind']=='support' and a['state']=='ready'])
+        self.assertEqual(self.outbox()[-1],(self.GROUP,'💬 Ticket '+code+': here is the photo'))
+    def test_take_then_quote_reply_and_close(self):
+        code=self.handoff()
+        agent={'type':'agent','sender':'6289999999999@c.us'}
+        self.assertEqual(self.post('/support/inbound',{**agent,'text':'take '+code.lower()})[0],200)
+        self.assertEqual((self.support()['state'],self.support()['agent']),('human','6289999999999'))
+        self.post('/support/inbound',{**agent,'text':'Sorry about that! We will send a new one.','quoted':'🔔 Ticket '+code+' · high'})
+        self.post('/support/inbound',{**agent,'text':'reply '+code+' Tracking follows tomorrow.'})
+        self.post('/support/inbound',{**agent,'text':'lunch?'})
+        out=self.outbox()
+        self.assertIn(('6281200000001@c.us','Sorry about that! We will send a new one.'),out)
+        self.assertIn(('6281200000001@c.us','Tracking follows tomorrow.'),out)
+        self.post('/support/inbound',{**agent,'text':'close '+code})
+        self.assertEqual(self.support()['state'],'bot')
+        self.runner.run_once(); self.runner.run_once()
+        self.assertEqual(self.runner.api.task['status']['status'],'complete')
+        self.assertTrue(any('Taken by' in c['comment_text'] for c in self.runner.api.comments))
+        self.post('/support/inbound',{**agent,'text':'close '+code})
+        self.assertEqual(self.outbox()[-1],(self.GROUP,'No open ticket '+code+'.'))
+        self.customer('MSG00000010','thanks!')
+        self.assertTrue([a for a in all_actions(self.store) if a['kind']=='support' and a['state']=='ready'])
+    def test_direct_phone_reply_pauses_bot_but_bot_echo_does_not(self):
+        self.customer(); a=self.job(); self.answer(a)
+        self.runner.send_once()
+        self.post('/support/inbound',{'type':'outgoing','chatId':'6281200000001@c.us','text':'Hi!'})
+        self.assertEqual(self.support()['state'],'bot')
+        self.post('/support/inbound',{'type':'outgoing','chatId':'6281200000001@c.us','text':'Hi, this is Ama from the team'})
+        row=self.support()
+        self.assertEqual((row['state'],row['agent']),('human','phone'))
+        self.assertIn('bot '+row['code'],self.outbox()[-1][1])
+        self.customer('MSG00000011','ok thanks')
+        self.assertFalse([a for a in all_actions(self.store) if a['kind']=='support' and a['state']=='ready'])
+        self.assertNotIn('ok thanks',self.outbox()[-1][1])  # agent on the phone already sees it
+        self.post('/support/inbound',{'type':'agent','sender':'6289999999999@c.us','text':'bot '+row['code']})
+        self.assertEqual(self.support()['state'],'bot')
+    def test_customer_replies_use_the_live_gateway(self):
+        self.customer(); a=self.job(); self.answer(a)
+        calls=[]
+        self.runner.api.send=lambda chat,text,live=False,session='default': calls.append(live)
+        self.runner.send_once()
+        self.assertEqual(calls,[True])
+        from worker import API
+        api=API.__new__(API); api.n8n='http://n8n'; api.waha_key='k'; seen=[]
+        api.request=lambda m,url,data=None,headers=None: seen.append(url) or {'statusCode':200,'body':{}}
+        api.send('6281200000001@c.us','hi',live=True); api.send('phone','hi'); api.cu('777','GET','/task/abc12')
+        self.assertEqual(seen,['http://n8n/webhook/waha-action-tool-live','http://n8n/webhook/waha-action-tool','http://n8n/webhook/waha-action-tool-live'])
+    def test_unclaimed_ticket_is_repinged_and_idle_ticket_closes(self):
+        import time
+        code=self.handoff()
+        with self.store.db() as db: db.execute('UPDATE support SET opened=?',(time.time()-700,))
+        self.runner.support_tick(); self.runner.support_tick()
+        self.assertEqual(sum('still waiting' in t for _,t in self.outbox()),1)
+        with self.store.db() as db: db.execute('UPDATE support SET active=?',(time.time()-90000,))
+        self.runner.support_tick()
+        self.assertEqual(self.support()['state'],'bot')
+        self.assertIn('closed after 24 hours',self.outbox()[-1][1])
+    def test_model_failures_hand_off_instead_of_going_silent(self):
+        self.customer()
+        for _ in range(3):
+            a=self.job()
+            self.assertEqual(self.post('/support/failure',{'jobId':a['id'],'token':a['token'],'error':'Bad request - <model> "x" not found'})[0],200)
+            with self.store.db() as db:
+                if a['attempts']==0: self.assertEqual(db.execute("SELECT last_error FROM actions WHERE id=?",(a['id'],)).fetchone()[0],'support_job_failed: Bad request - model x not found')
+                db.execute("UPDATE actions SET next_run=0 WHERE kind='support'")
+        self.runner.run_once()
+        self.assertEqual(self.support()['state'],'waiting')
+        self.assertIn('passed it to our team',self.outbox()[0][1])
+    def test_long_emoji_message_is_accepted(self):
+        self.assertEqual(self.customer(text='😀'*4000)[0],200)
+        self.assertEqual(self.customer(key='MSG00000002',text='x'*4001)[0],400)
+    def test_daily_limit_hands_off_once_then_stays_quiet(self):
+        from unittest import mock
+        with mock.patch('worker.SUPPORT_DAILY',2):
+            for i in range(2):
+                self.customer('MSG0000010'+str(i)); a=self.job(); self.answer(a)
+            self.customer('MSG00000200','write me a python script')
+            self.assertEqual(self.support()['state'],'waiting')
+            self.assertIn('team will continue',self.outbox()[-1][1])
+            self.customer('MSG00000201','and another one')
+            self.assertEqual(len([a for a in all_actions(self.store) if a['kind']=='support']),2)
+            self.assertEqual(len([a for a in all_actions(self.store) if a['kind']=='ticket_open']),1)
+    def test_agents_group_cannot_submit_task_requests(self):
+        self.assertEqual(self.post('/submit',{'chatId':'phone','replyTo':self.GROUP,'reference':'WAHA pilot message ABCDEF123456','action':'save_idea','title':'x'})[0],400)

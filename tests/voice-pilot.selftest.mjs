@@ -11,7 +11,8 @@ const run=(name,input,refs={})=>{
   {first:()=>items[0],all:()=>items},
   name=>({first:()=>({json:refs[name][0]}),all:()=>refs[name].map(json=>({json}))}));
 };
-const ev=(body,from=people[0].ids[0],extra={})=>[{body:{event:'message',session:'default',payload:{from,fromMe:false,id:'false_'+from+'_ABCDEF123456',hasMedia:false,body,...extra}}}];
+const S=()=>wf===adfWf?'default':'personal';
+const ev=(body,from=people[0].ids[0],extra={})=>[{body:{event:'message',session:S(),payload:{from,fromMe:false,id:'false_'+from+'_ABCDEF123456',hasMedia:false,body,...extra}}}];
 for(const person of people) for(const alias of person.ids){
  const r=run('Validate test message',ev('task: Review copy @victor',alias))[0].json;
  assert.equal(r.title,'Review copy'); assert.deepEqual(r.assignees,['victor']); assert.deepEqual(r.allowedActions,person.actions);
@@ -64,11 +65,11 @@ assert.equal(tool({service:'clickup',list:'1100310000198006',method:'PUT',path:'
 // Every ClickUp call must name an allowed list, and list paths must match it.
 assert.equal(tool({service:'clickup',method:'GET',path:'/task/86abc123'}).reject,true);
 assert.equal(tool({service:'clickup',list:'1',method:'GET',path:'/task/86abc123'}).reject,true);
-assert.equal(tool({service:'clickup',list:'1100310000198006',method:'GET',path:'/list/1100380000193567/member'}).reject,true);
+assert.equal(tool({service:'clickup',list:'1100310000198006',method:'GET',path:'/list/1100380000200435/member'}).reject,true);
 assert.equal(tool({service:'clickup',list:'1100310000198006',method:'DELETE',path:'/task/86abc123'}).reject,true);
 assert.equal(tool({service:'clickup',list:'1100310000198006',method:'GET',path:'https://attacker.example'}).reject,true);
 assert.equal(tool({service:'clickup',list:'1100310000198006',method:'POST',path:'/list/other/task',data:{name:'test'}}).reject,true);
-assert.equal(tool({service:'waha',method:'POST',path:'/api/sendText',data:{session:'default',chatId:'unknown@c.us',text:'test'}}).reject,true);
+assert.equal(tool({service:'waha',method:'POST',path:'/api/sendText',data:{session:S(),chatId:'unknown@c.us',text:'test'}}).reject,true);
 assert.equal(run('Verify tool task scope',[{statusCode:200,body:{list:{id:'other'}}}],{'Validate tool request':[{list:'1100310000198006'}]})[0].json.response.statusCode,403);
 // Both gateway nodes allow exactly the default list plus every list in groups.json.
 {const groups=JSON.parse(fs.readFileSync(new URL('../actions/groups.json',import.meta.url),'utf8'));
@@ -125,7 +126,7 @@ console.log('Plain-text AI route self-tests passed');
 console.log('Sender lists match people.json');
 // Groups: prefix commands from a pilot member are accepted and answered privately; everything else is ignored.
 {const G='120363012345678901@g.us', lid=people[0].ids[1], key='3EB0ABCDEF123456';
- const gev=(body,participant=lid,extra={})=>[{body:{event:'message',session:'default',payload:{from:G,participant,fromMe:false,id:`false_${G}_${key}_${participant}`,hasMedia:false,body,...extra}}}];
+ const gev=(body,participant=lid,extra={})=>[{body:{event:'message',session:S(),payload:{from:G,participant,fromMe:false,id:`false_${G}_${key}_${participant}`,hasMedia:false,body,...extra}}}];
  const r=run('Validate test message',gev('task: Review copy @victor'))[0].json;
  assert.equal(r.chatId,lid); assert.equal(r.replyTo,G); assert.equal(r.title,'Review copy'); assert.equal(r.reference,'WAHA pilot message '+key);
  assert.equal(run('Validate test message',[{body:{...gev('idea: x')[0].body,payload:{...gev('idea: x')[0].body.payload,id:`false_${G}_${key}`}}}])[0].json.action,'save_idea');
@@ -138,12 +139,12 @@ console.log('Sender lists match people.json');
  assert.equal(run('Validate test message',gev('',lid,{hasMedia:true,media:{mimetype:'audio/ogg'}}))[0].json.ignored,true);
  assert.equal(run('Validate test message',gev('task: x',null))[0].json.ignored,true);
  assert.equal(run('Validate test message',ev(' task: Leading space'))[0].json.title,'Leading space');}
-{const send=chatId=>tool({service:'waha',method:'POST',path:'/api/sendText',data:{session:'default',chatId,text:'hi'}}).reject;
+{const send=chatId=>tool({service:'waha',method:'POST',path:'/api/sendText',data:{session:S(),chatId,text:'hi'}}).reject;
  assert.equal(send('120363012345678901@g.us'),undefined); assert.equal(send('120363012345678901@c.us'),true); assert.equal(send('x@g.us'),true); assert.equal(send(people[0].ids[0]),undefined);}
 console.log('Group prefix commands self-tests passed');
 // Mentioning the bot in a group sends a normal message to the AI; the mention is removed.
 {const G='120363012345678901@g.us', lid=people[0].ids[1];
- const gev=(body,extra={})=>[{body:{event:'message',session:'default',payload:{from:G,participant:lid,fromMe:false,id:`false_${G}_3EB0ABCDEF333333_${lid}`,hasMedia:false,body,...extra}}}];
+ const gev=(body,extra={})=>[{body:{event:'message',session:S(),payload:{from:G,participant:lid,fromMe:false,id:`false_${G}_3EB0ABCDEF333333_${lid}`,hasMedia:false,body,...extra}}}];
  for(const at of ['@73710631411953','@6281119903888']){
   const r=run('Validate test message',gev(at+' please remind Victor to send the samples tomorrow'))[0].json;
   assert.equal(r.freeText,true,at); assert.equal(r.replyTo,G); assert.ok(r.messageId.startsWith('false_'+G+'_'));}
@@ -163,12 +164,13 @@ console.log('Group bot-mention self-tests passed');
  assert.equal(t('*idea: Bundle*').action,'save_idea');
  assert.equal(t('*progress:* https://app.clickup.com/t/86abc123 waiting').task,'https://app.clickup.com/t/86abc123');
  const G='120363012345678901@g.us', lid=people[0].ids[1];
- const g=run('Validate test message',[{body:{event:'message',session:'default',payload:{from:G,participant:lid,fromMe:false,id:`false_${G}_3EB0ABCDEF999999_${lid}`,hasMedia:false,body:'*task: Test from group two*\n'+fig}}}])[0].json;
+ const g=run('Validate test message',[{body:{event:'message',session:S(),payload:{from:G,participant:lid,fromMe:false,id:`false_${G}_3EB0ABCDEF999999_${lid}`,hasMedia:false,body:'*task: Test from group two*\n'+fig}}}])[0].json;
  assert.equal(g.title,'Test from group two'); assert.equal(g.replyTo,G);}
 console.log('Formatted and multi-line command self-tests passed');
-// Dotcross ignores #adf and Ama Da Flow groups; its model no longer picks a workspace.
+// Dotcross keeps #adf messages on its own number (tag dropped, no workspace); its model no longer picks a workspace.
 {const t=b=>run('Validate test message',ev(b))[0].json;
- for(const b of ['task: Prepare the deck #adf','#ADF idea: Bundle','please remind Victor to send samples #adf']) assert.equal(t(b).ignored,true,b);
+ assert.equal(t('task: Prepare the deck #adf').title,'Prepare the deck'); assert.equal(t('task: Prepare the deck #adf').workspace,undefined);
+ assert.equal(t('#ADF idea: Bundle').action,'save_idea');
  assert.equal(t('task: Fix #adfoo tag').title,'Fix #adfoo tag');
  const job={chatId:'c',reference:'r',allowedActions:['create_task']};
  assert.equal(run('Validate voice action',model({action:'create_task',title:'Deck',workspace:'adf'}),{'Voice job':[job]})[0].json.workspace,undefined);
@@ -180,18 +182,23 @@ console.log('Dotcross #adf hand-off self-tests passed');
  const adfList=/CLICKUP_ADF_LIST_ID: "(\d+)"/.exec(fs.readFileSync(new URL('../compose.actions.yaml',import.meta.url),'utf8'))[1];
  const adfGroups=Object.keys(groups).filter(g=>String(groups[g])===adfList).sort();
  const pick=(w,name)=>w.nodes.find(n=>n.name===name).parameters.jsCode;
- const strip=js=>js.replace(/const (ROUTE|LISTS|ADF_LISTS) = [^\n]*/g,'');
+ const strip=js=>js.replace(/const (ROUTE|LISTS|ADF_LISTS|BOT) = [^\n]*/g,'').replace(/'(personal|default)'|\/api\/(personal|default)\/|\\\/api\\\/(personal|default)\\\//g,'SESSION');
  for(const name of ['Validate test message','Validate tool request','Use message text','Validate WAHA media URL','Voice job','Verify tool task scope'])
   assert.equal(strip(pick(adfWf,name)),strip(pick(dot,name)),name+' must match between workflows');
  assert.deepEqual(JSON.parse(/const ADF_GROUPS = (\[[^\]]*\])/.exec(pick(dot,'Validate test message'))[1]),adfGroups,'ADF_GROUPS must match groups.json');
  const lid=people[0].ids[1];
- const gev=(G,body)=>[{body:{event:'message',session:'default',payload:{from:G,participant:lid,fromMe:false,id:`false_${G}_3EB0ABCDEF555555_${lid}`,hasMedia:false,body}}}];
+ const gev=(G,body,session)=>[{body:{event:'message',session,payload:{from:G,participant:lid,fromMe:false,id:`false_${G}_3EB0ABCDEF555555_${lid}`,hasMedia:false,body}}}];
  const other='120363012345678901@g.us'; // an unmapped group such as DotCross (IJV is in CLICKUP_NO_ADF_GROUPS)
- const cases=[ev('task: Private'),ev('task: Private #adf'),ev('please remind Victor to send samples #adf'),ev('yes abcdef1234'),
-  ev('',undefined,{hasMedia:true,media:{mimetype:'audio/ogg'}}),gev(adfGroups[0],'task: Group'),gev(other,'task: Group'),gev(other,'task: Group #adf')];
  const take=(w,input)=>new Function('$input','$',pick(w,'Validate test message'))({first:()=>({json:input[0]})},()=>null)[0].json.ignored!==true;
- const want=[false,true,true,false,false,true,false,true];
- cases.forEach((c,i)=>{assert.equal(take(adfWf,c),want[i],'ADF case '+i); assert.equal(take(dot,c),!want[i],'Dotcross case '+i);});
+ const pev=(body,session)=>[{body:{event:'message',session,payload:{from:people[0].ids[0],fromMe:false,id:'false_'+people[0].ids[0]+'_ABCDEF123456',hasMedia:false,body}}}];
+ // Ama Da Flow takes everything on its number; Dotcross takes everything on its number except the Ama Da Flow groups.
+ for(const session of ['default','personal']){
+  const own=w=>(w===adfWf)===(session==='default');
+  for(const c of [pev('task: Private',session),pev('task: Private #adf',session),pev('yes abcdef1234',session),gev(other,'task: Group',session)])
+   for(const w of [adfWf,dot]) assert.equal(take(w,c),own(w),session+' '+JSON.stringify(c[0].body.payload.body));
+  assert.equal(take(adfWf,gev(adfGroups[0],'task: Group',session)),session==='default');
+  assert.equal(take(dot,gev(adfGroups[0],'task: Group',session)),false);}
+ assert.equal(take(dot,pev('task: x','other')),false); assert.equal(take(adfWf,pev('task: x','other')),false);
  wf=adfWf;
  // The ADF intake tags #adf work with workspace adf; that tag is what sends a private #adf message to the ADF list.
  {const t=b=>run('Validate test message',ev(b))[0].json;
@@ -199,8 +206,8 @@ console.log('Dotcross #adf hand-off self-tests passed');
   assert.equal(t('#ADF idea: Bundle').action,'save_idea'); assert.equal(t('#ADF idea: Bundle').workspace,'adf');
   assert.equal(t('progress: 86abc123 done #adf').update,'done');
   assert.equal(t('please remind Victor to send samples #adf').workspace,'adf');
-  assert.equal(run('Validate test message',gev(other,'task: Deck #adf'))[0].json.workspace,'adf');
-  assert.equal(run('Validate test message',gev(adfGroups[0],'task: Deck'))[0].json.replyTo,adfGroups[0]);}
+  assert.equal(run('Validate test message',gev(other,'task: Deck #adf','default'))[0].json.workspace,'adf'); assert.equal(t('task: Deck').session,'default');
+  assert.equal(run('Validate test message',gev(adfGroups[0],'task: Deck','default'))[0].json.replyTo,adfGroups[0]);}
  assert.equal(tool({service:'clickup',list:adfList,method:'GET',path:`/list/${adfList}/member`}).adf,true);
  for(const id of Object.values(groups).map(String).filter(id=>id!==adfList)) assert.equal(tool({service:'clickup',list:id,method:'GET',path:`/list/${id}/member`}).reject,true,id);
  for(const n of wf.nodes.filter(n=>n.credentials?.clickUpApi&&n.name!=='Read knowledge page')) assert.equal(n.credentials.clickUpApi.name,'ClickUp ADF',n.name);
@@ -244,9 +251,9 @@ console.log('Ama Da Flow split, gateway and Claude Haiku self-tests passed');
   assert.deepEqual(list(pick(w,'Validate test message'),'NO_ADF_PEOPLE'),noPeople);}
  assert.deepEqual(list(pick(dot,'Check for Ama Da Flow'),'NO_ADF_PEOPLE'),noPeople);
  assert.ok(noPeople.length && noGroups.length);
- const intake=(w,input)=>new Function('$input','$',pick(w,'Validate test message'))({first:()=>({json:input[0]})},()=>null)[0].json;
+ const intake=(w,input)=>{input[0].body.session=w===adfWf?'default':'personal'; return new Function('$input','$',pick(w,'Validate test message'))({first:()=>({json:input[0]})},()=>null)[0].json;};
  const blocked=noPeople[1], ok=people.find(p=>!p.noAdf).ids[1], adfG=Object.keys(groups).find(g=>String(groups[g])===adfList);
- const gev=(G,body,who)=>[{body:{event:'message',session:'default',payload:{from:G,participant:who,fromMe:false,id:`false_${G}_3EB0ABCDEF444444_${who}`,hasMedia:false,body}}}];
+ const gev=(G,body,who)=>[{body:{event:'message',session:S(),payload:{from:G,participant:who,fromMe:false,id:`false_${G}_3EB0ABCDEF444444_${who}`,hasMedia:false,body}}}];
  // #adf from a noAdf person or in IJV stays in Dotcross, without the workspace tag.
  for(const c of [ev('task: Deck #adf',blocked),gev(noGroups[0],'task: Deck #adf',ok)]){
   assert.equal(intake(adfWf,c).ignored,true); const d=intake(dot,c); assert.equal(d.title,'Deck'); assert.equal(d.workspace,undefined);}

@@ -18,13 +18,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 LIST_ID = os.getenv('CLICKUP_LIST_ID', '1100310000198006')
-ADF_LIST_ID = os.getenv('CLICKUP_ADF_LIST_ID', '1100380000193567')
+ADF_LIST_ID = os.getenv('CLICKUP_ADF_LIST_ID', '1100380000200435')
 # While paused, everything meant for Ama Da Flow goes to LIST_ID instead (e.g. no ClickUp access yet).
 ADF_PAUSED = os.getenv('CLICKUP_ADF_PAUSED') == 'true'
 # Groups whose requests never go to Ama Da Flow, even with #adf. People get "noAdf": true in people.json.
 NO_ADF_GROUPS = set(filter(None, os.getenv('CLICKUP_NO_ADF_GROUPS', '').split(',')))
 ACTIONS = {'create_task', 'save_idea', 'post_progress'}
 RETENTION = 30 * 86400
+# Live agent: customers (private chats not in people.json) talk to Sonnet; humans take over from SUPPORT_GROUP.
+SUPPORT_LIST_ID = os.getenv('SUPPORT_LIST_ID', '')
+SUPPORT_GROUP = os.getenv('SUPPORT_GROUP', '')
+SUPPORT_KINDS = {'support', 'ticket_open', 'ticket_note'}
+SUPPORT_DEBOUNCE = float(os.getenv('SUPPORT_DEBOUNCE', '4'))  # customers send bursts; answer once
+SUPPORT_PING = 600  # re-ping the group when nobody took a ticket after 10 minutes
+SUPPORT_IDLE = 86400  # a ticket with no activity for 24 hours closes and the bot resumes
+# Bot answers per customer per 24 hours. Past it a person takes over, so a real customer is helped and abuse costs one ticket.
+SUPPORT_DAILY = int(os.getenv('SUPPORT_DAILY', '30'))
+CUSTOMER = re.compile(r'[0-9]{5,20}@(?:c\.us|lid)')
 
 
 def words(value):
@@ -71,7 +81,19 @@ class Store:
                     attempts INTEGER NOT NULL DEFAULT 0, sent REAL,
                     started REAL, last_error TEXT
                 );
+                -- One row per customer chat. Holds state only; message content lives in WAHA and the ClickUp ticket.
+                CREATE TABLE IF NOT EXISTS support (
+                    chat TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'bot', code TEXT, task_id TEXT,
+                    agent TEXT, opened REAL, active REAL NOT NULL, pinged INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS support_code ON support(code);
             ''')
+            # The WAHA session (phone number) a reply is sent from; rows from before 2026-11-17 used default.
+            if 'session' not in [column[1] for column in db.execute('PRAGMA table_info(outbox)')]:
+                db.execute("ALTER TABLE outbox ADD COLUMN session TEXT NOT NULL DEFAULT 'default'")
+            # The customer's phone for @lid chats, as n8n resolved it, so agents get a number and a wa.me link.
+            if 'phone' not in [column[1] for column in db.execute('PRAGMA table_info(support)')]:
+                db.execute('ALTER TABLE support ADD COLUMN phone TEXT')
 
     @contextmanager
     def db(self):
@@ -92,13 +114,16 @@ class Store:
         return value
 
     def submit(self, person, chat, reference, payload):
+        with self.db() as db:
+            return self.insert(db, person, chat, reference, payload)
+
+    def insert(self, db, person, chat, reference, payload, delay=0):
         action_id = hashlib.sha256((person + '\0' + reference).encode()).hexdigest()[:32]
         now = time.time()
         state = 'extracting' if payload['action'] == 'voice' else 'ready'
-        with self.db() as db:
-            db.execute('INSERT OR IGNORE INTO actions (id,person,chat,reference,kind,payload,state,created,updated,next_run) VALUES (?,?,?,?,?,?,?,?,?,?)',
-                       (action_id, person, chat, reference, payload['action'], json.dumps(payload), state, now, now, now))
-            return self.row(db.execute('SELECT * FROM actions WHERE id=?', (action_id,)).fetchone())
+        db.execute('INSERT OR IGNORE INTO actions (id,person,chat,reference,kind,payload,state,created,updated,next_run) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                   (action_id, person, chat, reference, payload['action'], json.dumps(payload), state, now, now, now + delay))
+        return self.row(db.execute('SELECT * FROM actions WHERE id=?', (action_id,)).fetchone())
 
     def get(self, action_id):
         with self.db() as db:
@@ -129,8 +154,8 @@ class Store:
     @staticmethod
     def enqueue(db, action, purpose, text):
         now = time.time()
-        db.execute('INSERT OR IGNORE INTO outbox (id,action_id,chat,text,created,next_run) VALUES (?,?,?,?,?,?)',
-                   (action['id'] + ':' + purpose, action['id'], action['chat'], text, now, now))
+        db.execute('INSERT OR IGNORE INTO outbox (id,action_id,chat,text,created,next_run,session) VALUES (?,?,?,?,?,?,?)',
+                   (action['id'] + ':' + purpose, action['id'], action['chat'], text, now, now, (action.get('payload') or {}).get('session', 'default')))
 
     def notify(self, action, purpose, text):
         with self.db() as db:
@@ -170,9 +195,15 @@ class API:
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             raise APIError('provider_unavailable', retryable=True, ambiguous=method != 'GET') from None
 
-    def tool(self, service, method, path, data=None, list_id=None):
-        # Ama Da Flow lists go to that workflow's gateway; other lists and WhatsApp replies go to Dotcross.
-        hook = 'waha-action-tool' if list_id == ADF_LIST_ID else 'waha-action-tool-dotcross'
+    def tool(self, service, method, path, data=None, list_id=None, live=False, session=None):
+        # Ama Da Flow lists go to that workflow's gateway; the support list and customer replies go to the live agent; the rest to Dotcross.
+        # WhatsApp calls go to the workflow that owns the number: session default is Ama Da Flow, personal is Dotcross.
+        if live or (SUPPORT_LIST_ID and list_id == SUPPORT_LIST_ID):
+            hook = 'waha-action-tool-live'
+        elif session:
+            hook = 'waha-action-tool' if session == 'default' else 'waha-action-tool-dotcross'
+        else:
+            hook = 'waha-action-tool' if list_id == ADF_LIST_ID else 'waha-action-tool-dotcross'
         result = self.request('POST', self.n8n + '/webhook/' + hook, {'service':service,'method':method,'path':path,'data':data,'list':list_id}, {'X-Api-Key':self.waha_key})
         status = result.get('statusCode', 502)
         if not isinstance(status, int) or not 200 <= status < 300:
@@ -223,12 +254,15 @@ class API:
     def status(self, list_id, task_id, status):
         return self.cu(list_id, 'PUT', '/task/' + task_id, {'status': status})
 
-    def send(self, chat_id, text):
-        return self.tool('waha', 'POST', '/api/sendText', {'session': 'default', 'chatId': chat_id, 'text': text, 'linkPreview': False})
+    def send(self, chat_id, text, live=False, session='default'):
+        return self.tool('waha', 'POST', '/api/sendText', {'session': session, 'chatId': chat_id, 'text': text, 'linkPreview': False}, live=live, session=session)
 
-    def reply_exists(self, chat_id, text, since):
+    def support_job(self, action, token):
+        return self.request('POST', self.n8n + '/webhook/waha-live-agent-worker', {'jobId': action['id'], 'token': token, 'chatId': action['chat']}, {'X-Api-Key': self.waha_key})
+
+    def reply_exists(self, chat_id, text, since, session='default'):
         chat = urllib.parse.quote(chat_id, safe='')
-        rows = self.tool('waha', 'GET', '/api/default/chats/' + chat + '/messages?limit=50&downloadMedia=false')
+        rows = self.tool('waha', 'GET', '/api/' + session + '/chats/' + chat + '/messages?limit=50&downloadMedia=false', session=session)
         if not isinstance(rows, list):
             return False
         return any(row.get('fromMe') is True and row.get('body') == text and float(row.get('timestamp') or 0) >= since - 2 for row in rows)
@@ -319,6 +353,8 @@ class Runner:
                 return
             wanted = 'pending' if payload['action'] == 'confirm' else 'attention'
             candidates = [self.store.row(r) for r in db.execute('SELECT * FROM actions WHERE person=? AND state=?', (action['person'], wanted))]
+            # A yes on one number never answers a request made on the other.
+            candidates = [r for r in candidates if r['payload'].get('session', 'default') == payload.get('session', 'default')]
             group = action['chat'].endswith('@g.us')
             if group:
                 # In a group, yes/no only answers requests made in that group.
@@ -505,11 +541,219 @@ class Runner:
         message = messages.get(error.code, ('Your comment is saved. ' if partial else '') + 'I could not finish request ' + action['id'][:10] + '. Reply retry ' + action['id'][:10] + ' after the connection or permissions are restored.')
         self.store.patch(action['id'], state='attention', attempts=attempts, last_error=error.code, notice=(action, 'attention-' + str(current['payload'].get('retryRound', 0)) + '-' + str(attempts), message))
 
+    # ---- Live agent -------------------------------------------------------
+
+    def customer(self, chat):
+        return bool(CUSTOMER.fullmatch(chat or '')) and chat not in self.people
+
+    @staticmethod
+    def say(db, chat, text):
+        if chat:
+            Store.enqueue(db, {'id': 'support-' + secrets.token_hex(8), 'chat': chat}, 'msg', text[:4000])
+
+    def who(self, chat):
+        number = chat.split('@')[0]
+        if not chat.endswith('@c.us'):
+            with self.store.db() as db:
+                row = db.execute('SELECT phone FROM support WHERE chat=?', (chat,)).fetchone()
+            if not row or not row['phone']:
+                return 'WhatsApp user ' + number
+            number = row['phone'][1:]
+        return '+' + number + ' https://wa.me/' + number
+
+    def support_row(self, db, chat):
+        now = time.time()
+        db.execute('INSERT OR IGNORE INTO support (chat,active) VALUES (?,?)', (chat, now))
+        return dict(db.execute('SELECT * FROM support WHERE chat=?', (chat,)).fetchone())
+
+    def open_ticket(self, db, chat, fields):
+        now = time.time()
+        code = secrets.token_hex(3).upper()
+        db.execute("UPDATE support SET state='waiting',code=?,task_id=NULL,agent=NULL,opened=?,active=?,pinged=0 WHERE chat=?", (code, now, now, chat))
+        db.execute("UPDATE actions SET state='cancelled',updated=? WHERE chat=? AND kind='support' AND state='ready'", (now, chat))
+        self.store.insert(db, chat, chat, 'Support ticket ' + code, {'action': 'ticket_open', 'code': code, **fields})
+        return code
+
+    def note(self, db, row, text, status=None):
+        if row.get('task_id') and SUPPORT_LIST_ID:
+            self.store.insert(db, row['chat'], row['chat'], 'Support note ' + secrets.token_hex(8), {'action': 'ticket_note', 'taskId': row['task_id'], 'text': text, **({'status': status} if status else {})})
+
+    def release(self, db, row, text, complete):
+        # Hand the chat back to the bot; the ticket code stops working.
+        db.execute("UPDATE support SET state='bot',code=NULL,task_id=NULL,agent=NULL,opened=NULL,pinged=0,active=? WHERE chat=?", (time.time(), row['chat']))
+        self.note(db, row, text, 'complete' if complete else None)
+        self.say(db, SUPPORT_GROUP, text)
+
+    def support_inbound(self, body):
+        kind = body.get('type')
+        now = time.time()
+        with self.store.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if kind == 'customer':
+                chat, key = body.get('chatId', ''), body.get('messageKey', '')
+                text = body.get('text') if isinstance(body.get('text'), str) else ''
+                if not self.customer(chat) or not re.fullmatch(r'[A-Za-z0-9-]{8,128}', key) or len(text) > 4000:
+                    raise ValueError('Invalid customer message')
+                row = self.support_row(db, chat)
+                db.execute('UPDATE support SET active=? WHERE chat=?', (now, chat))
+                if row['state'] == 'bot':
+                    # One answer per burst: a queued job is pushed back instead of adding another.
+                    queued = db.execute("UPDATE actions SET next_run=?,updated=? WHERE chat=? AND kind='support' AND state='ready'", (now + SUPPORT_DEBOUNCE, now, chat)).rowcount
+                    if not queued:
+                        answered = db.execute("SELECT COUNT(*) FROM actions WHERE chat=? AND kind='support' AND created>?", (chat, now - 86400)).fetchone()[0]
+                        if answered >= SUPPORT_DAILY:
+                            code = self.open_ticket(db, chat, {'summary': 'The customer reached the assistant limit of ' + str(SUPPORT_DAILY) + ' answers in 24 hours. Check whether they need help or are misusing the chat.', 'reason': 'daily_limit', 'priority': 'low', 'transcript': ''})
+                            self.say(db, chat, "Thanks for your patience! A member of our team will continue this chat with you here.\n\nRef: " + code)
+                        else:
+                            self.store.insert(db, chat, chat, 'WAHA support message ' + key, {'action': 'support'}, SUPPORT_DEBOUNCE)
+                elif row['agent'] != 'phone':
+                    # Agents working from the group see the customer's follow-ups there.
+                    self.say(db, SUPPORT_GROUP, '💬 Ticket ' + row['code'] + ': ' + (text.strip() or '[photo or file — open the chat to see it]'))
+                return
+            if kind == 'outgoing':
+                chat, text = body.get('chatId', ''), body.get('text') if isinstance(body.get('text'), str) else ''
+                if not self.customer(chat):
+                    return
+                # The bot's own sends echo back from WAHA; `started` is set before sending, so the echo always finds it.
+                if db.execute('SELECT 1 FROM outbox WHERE chat=? AND text=? AND started>=?', (chat, text, now - 600)).fetchone():
+                    return
+                row = self.support_row(db, chat)
+                if row['state'] == 'human':
+                    db.execute('UPDATE support SET active=? WHERE chat=?', (now, chat))
+                    return
+                code = row['code'] or secrets.token_hex(3).upper()
+                db.execute("UPDATE support SET state='human',agent='phone',code=?,opened=COALESCE(opened,?),active=? WHERE chat=?", (code, now, now, chat))
+                db.execute("UPDATE actions SET state='cancelled',updated=? WHERE chat=? AND kind='support' AND state='ready'", (now, chat))
+                self.say(db, SUPPORT_GROUP, '🙋 Someone is replying to ' + self.who(chat) + ' directly, so the bot is paused there (ticket ' + code + '). Send "bot ' + code + '" to hand it back.')
+                return
+            if kind == 'agent':
+                text = body.get('text') if isinstance(body.get('text'), str) else ''
+                sender = body.get('sender') if isinstance(body.get('sender'), str) else ''
+                quoted = body.get('quoted') if isinstance(body.get('quoted'), str) else ''
+                if not SUPPORT_GROUP or not re.fullmatch(r'[0-9]{5,20}@(?:c\.us|lid)', sender) or len(text) > 4000:
+                    raise ValueError('Invalid agent message')
+                command = re.fullmatch(r'\s*(take|close|bot|reply)\s+([A-Fa-f0-9]{6})\b\s*([\s\S]*)', text, re.I)
+                if command:
+                    verb, code, rest = command.group(1).lower(), command.group(2).upper(), command.group(3).strip()
+                else:
+                    ticket = re.search(r'Ticket ([A-F0-9]{6})\b', quoted)
+                    if not ticket or not text.strip():
+                        return  # agents talking among themselves
+                    verb, code, rest = 'reply', ticket.group(1), text.strip()
+                found = db.execute('SELECT * FROM support WHERE code=?', (code,)).fetchone()
+                if not found:
+                    self.say(db, SUPPORT_GROUP, 'No open ticket ' + code + '.')
+                    return
+                row, agent = dict(found), sender.split('@')[0]
+                if verb == 'take':
+                    db.execute("UPDATE support SET state='human',agent=?,active=? WHERE chat=?", (agent, now, row['chat']))
+                    self.note(db, row, 'Taken by ' + agent + ' on WhatsApp.')
+                    self.say(db, SUPPORT_GROUP, '✅ Ticket ' + code + ' is taken by ' + agent + '. Quote-reply a ticket message or send "reply ' + code + ' <text>". Send "close ' + code + '" when done.')
+                elif verb == 'reply':
+                    if not rest:
+                        return
+                    db.execute("UPDATE support SET state='human',agent=COALESCE(NULLIF(agent,'phone'),?),active=? WHERE chat=?", (agent, now, row['chat']))
+                    self.say(db, row['chat'], rest)
+                else:
+                    self.release(db, row, ('Ticket ' + code + ' closed by ' if verb == 'close' else 'Ticket ' + code + ' handed back to the bot by ') + agent + '. The bot answers this chat again.', verb == 'close')
+                return
+            raise ValueError('Unknown support message')
+
+    def support_answer(self, db, action, answer):
+        # Called inside the job callback transaction.
+        row = self.support_row(db, action['chat'])
+        if row['state'] != 'bot':
+            return  # a person took over while the model was thinking
+        if answer['handoff']:
+            code = self.open_ticket(db, action['chat'], {k: answer[k] for k in ('summary', 'reason', 'priority', 'transcript')})
+            self.say(db, action['chat'], answer['reply'] + '\n\nRef: ' + code)
+        else:
+            self.say(db, action['chat'], answer['reply'])
+
+    def support_fallback(self, db, action):
+        row = self.support_row(db, action['chat'])
+        if row['state'] == 'bot':
+            code = self.open_ticket(db, action['chat'], {'summary': 'The assistant could not answer (system error).', 'reason': 'bot_error', 'priority': 'normal', 'transcript': ''})
+            self.say(db, action['chat'], "Thanks for your message! I've passed it to our team, and someone will reply here shortly.\n\nRef: " + code)
+
+    def support_tick(self):
+        now = time.time()
+        with self.store.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for row in db.execute("SELECT * FROM support WHERE state='waiting' AND agent IS NULL AND pinged=0 AND opened<?", (now - SUPPORT_PING,)).fetchall():
+                db.execute('UPDATE support SET pinged=1 WHERE chat=?', (row['chat'],))
+                self.say(db, SUPPORT_GROUP, '⏰ Ticket ' + row['code'] + ' is still waiting for an agent. Reply "take ' + row['code'] + '" to claim it.')
+            for row in db.execute("SELECT * FROM support WHERE state!='bot' AND active<?", (now - SUPPORT_IDLE,)).fetchall():
+                self.release(db, dict(row), 'Ticket ' + row['code'] + ' closed after 24 hours without activity. The bot answers this chat again.', True)
+            db.execute("DELETE FROM support WHERE state='bot' AND active<?", (now - RETENTION,))
+
+    def support_run(self, action):
+        payload = action['payload']
+        try:
+            if action['kind'] == 'support':
+                with self.store.db() as db:
+                    state = db.execute('SELECT state FROM support WHERE chat=?', (action['chat'],)).fetchone()
+                if not state or state['state'] != 'bot':
+                    self.store.patch(action['id'], state='cancelled')
+                    return
+                if action['attempts'] >= 3:
+                    with self.store.db() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        self.support_fallback(db, action)
+                        db.execute("UPDATE actions SET state='done',token=NULL,updated=? WHERE id=?", (time.time(), action['id']))
+                    return
+                token = secrets.token_hex(24)
+                self.store.patch(action['id'], token=token)
+                self.api.support_job(action, token)
+                with self.store.db() as db:
+                    db.execute("UPDATE actions SET state='extracting',next_run=?,attempts=attempts+1 WHERE id=? AND token=? AND state='running'", (time.time() + 300, action['id'], token))
+            elif action['kind'] == 'ticket_open':
+                link = ''
+                if SUPPORT_LIST_ID:
+                    marker = 'Support ticket ' + payload['code']
+                    task = next((t for t in self.api.tasks(SUPPORT_LIST_ID) if str(t.get('description', '')).strip().split('\n')[-1].strip() == marker), None)
+                    if not task:
+                        body = '\n\n'.join(filter(None, [
+                            '**Customer:** ' + self.who(action['chat']), '**Priority:** ' + payload['priority'],
+                            '**Why it was handed off:** ' + payload['reason'], '**Summary:** ' + payload['summary'],
+                            ('**Conversation:**\n' + payload['transcript']) if payload['transcript'] else '', marker]))
+                        task = self.api.create(SUPPORT_LIST_ID, {'name': '[' + payload['code'] + '] ' + payload['summary'][:120], 'markdown_content': body[:5000], 'tags': ['whatsapp'], 'assignees': []})
+                    link = '\nClickUp: https://app.clickup.com/t/' + task['id']
+                    with self.store.db() as db:
+                        db.execute('UPDATE support SET task_id=? WHERE chat=? AND code=?', (task['id'], action['chat'], payload['code']))
+                self.ticket_notice(action, link)
+            elif action['kind'] == 'ticket_note':
+                self.api.comment(SUPPORT_LIST_ID, payload['taskId'], payload['text'])
+                if payload.get('status'):
+                    self.api.status(SUPPORT_LIST_ID, payload['taskId'], payload['status'])
+                self.store.patch(action['id'], state='done', payload={})
+        except Exception as error:
+            attempts = action['attempts'] + 1
+            if attempts < 6 and (not isinstance(error, APIError) or error.retryable):
+                self.store.patch(action['id'], state='ready', attempts=attempts, last_error=getattr(error, 'code', 'processing_error'), next_run=time.time() + 30 * 2 ** attempts)
+            elif action['kind'] == 'ticket_open':
+                self.ticket_notice(action, '\n⚠️ The ClickUp ticket could not be created.')
+            else:
+                self.store.patch(action['id'], state='attention', attempts=attempts, last_error=getattr(error, 'code', 'processing_error'))
+
+    def ticket_notice(self, action, link):
+        payload = action['payload']
+        with self.store.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.say(db, SUPPORT_GROUP, '🔔 Ticket ' + payload['code'] + ' · ' + payload['priority'] + '\nCustomer: ' + self.who(action['chat']) + '\n' + payload['summary'] + '\nWhy: ' + payload['reason'] + link
+                     + '\n\nReply "take ' + payload['code'] + '" to claim it, then quote-reply this message to answer the customer. Or chat with them directly from the phone.')
+            # The transcript lives only in ClickUp.
+            db.execute("UPDATE actions SET state='done',payload='{}',token=NULL,last_error=NULL,updated=? WHERE id=?", (time.time(), action['id']))
+
     def run_once(self):
         self.store.cleanup()
+        self.support_tick()
         action = self.store.claim()
         if not action:
             return False
+        if action['kind'] in SUPPORT_KINDS:
+            self.support_run(action)
+            return True
         try:
             person = self.person(action)
             kind = action['kind']
@@ -548,10 +792,10 @@ class Runner:
             return False
         message = dict(row)
         try:
-            if message['started'] is None or not self.api.reply_exists(message['chat'], message['text'], message['started']):
+            if message['started'] is None or not self.api.reply_exists(message['chat'], message['text'], message['started'], session=message['session']):
                 with self.store.db() as db:
                     db.execute('UPDATE outbox SET started=? WHERE id=?', (time.time(), message['id']))
-                self.api.send(message['chat'], message['text'])
+                self.api.send(message['chat'], message['text'], live=self.customer(message['chat']), session=message['session'])
             with self.store.db() as db:
                 db.execute('UPDATE outbox SET sent=?,last_error=NULL WHERE id=?', (time.time(), message['id']))
         except Exception:
@@ -581,6 +825,22 @@ def validated_plan(value):
     return {'action':kind,'title':field('title',200),'description':field('description',2000,False),'assignees':assignees}
 
 
+def support_answer(value):
+    # Model output is untrusted: fixed shape, bounded text.
+    if not isinstance(value, dict) or not isinstance(value.get('handoff'), bool):
+        raise ValueError('Invalid answer')
+    def field(name, limit, required=True):
+        text = value.get(name, '')
+        if not isinstance(text, str) or len(text) > limit or (required and not text.strip()):
+            raise ValueError('Invalid answer field')
+        return text.strip()
+    answer = {'handoff': value['handoff'], 'reply': field('reply', 1500)}
+    if answer['handoff']:
+        answer.update(summary=field('summary', 500), reason=field('reason', 200), transcript=field('transcript', 3000, False),
+                      priority=value.get('priority') if value.get('priority') in ('low', 'normal', 'high') else 'normal')
+    return answer
+
+
 def application(store, runner, api_key):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -606,7 +866,8 @@ def application(store, runner, api_key):
                 return
             try:
                 length = int(self.headers.get('Content-Length','0'))
-                if not 0 < length <= 8192:
+                # Support bodies carry customer text (up to 4000 characters, up to 48 KB as escaped JSON) and transcripts.
+                if not 0 < length <= (65536 if self.path.startswith('/support/') else 8192):
                     raise ValueError('Invalid body length')
                 body = json.loads(self.rfile.read(length))
                 if self.path == '/submit':
@@ -615,9 +876,14 @@ def application(store, runner, api_key):
                     if not person or not re.fullmatch(r'WAHA pilot message [A-Za-z0-9-]{8,128}',reference):
                         raise ValueError('Invalid sender or message')
                     reply_to = body.get('replyTo')
+                    session = body.get('session', 'default')
+                    if session not in ('default', 'personal'):
+                        raise ValueError('Invalid session')
                     # A group message may carry a messageId only as a plain-text AI job (the bot was mentioned).
                     if reply_to is not None and (not isinstance(reply_to,str) or not re.fullmatch(r'[0-9-]{5,40}@g\.us',reply_to) or (body.get('messageId') and body.get('freeText') is not True)):
                         raise ValueError('Invalid group')
+                    if reply_to and reply_to == SUPPORT_GROUP:
+                        raise ValueError('The agents group only takes live-agent commands')
                     if body.get('messageId') and 'action' not in body:
                         message_id = body['messageId']
                         if not isinstance(message_id,str) or len(message_id)>250 or not message_id.startswith('false_' + (reply_to or chat) + '_'):
@@ -641,8 +907,35 @@ def application(store, runner, api_key):
                         payload['listId'] = ADF_LIST_ID if adf else runner.groups.get(reply_to, LIST_ID)
                     if reply_to and runner.groups.get(reply_to) == ADF_LIST_ID and not runner.adf_ok(person, reply_to):
                         raise ValueError('Sender may not use Ama Da Flow')
+                    payload['session'] = session
                     action = store.submit(person['person'],reply_to or chat,reference,payload)
                     self.respond(200, {'accepted':True,'id':action['id'],'state':action['state']})
+                elif self.path == '/support/inbound':
+                    runner.support_inbound(body)
+                    self.respond(200, {'accepted':True})
+                elif self.path in ('/support/reply','/support/failure'):
+                    answer = support_answer(body.get('answer')) if self.path == '/support/reply' else None
+                    with store.db() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        action = store.row(db.execute('SELECT * FROM actions WHERE id=?',(body.get('jobId'),)).fetchone())
+                        if not action or action['kind']!='support' or action['state'] not in ('running','extracting') or not action['token'] or not hmac.compare_digest(action['token'],body.get('token') or ''):
+                            self.respond(409, {'error':'stale_job'})
+                            return
+                        if answer:
+                            phone = body.get('phone')
+                            if isinstance(phone, str) and re.fullmatch(r'\+[0-9]{6,15}', phone):
+                                runner.support_row(db, action['chat'])
+                                db.execute('UPDATE support SET phone=? WHERE chat=?', (phone, action['chat']))
+                            runner.support_answer(db, action, answer)
+                            db.execute("UPDATE actions SET state='done',token=NULL,updated=? WHERE id=?", (time.time(),action['id']))
+                        elif action['attempts'] >= 3:
+                            runner.support_fallback(db, action)
+                            db.execute("UPDATE actions SET state='done',token=NULL,updated=? WHERE id=?", (time.time(),action['id']))
+                        else:
+                            # n8n's error message (provider or validation error, not customer text) helps debugging; executions are not saved.
+                            reason = re.sub(r'[^A-Za-z0-9 .,:_()/-]', '', str(body.get('error') or ''))[:200]
+                            db.execute("UPDATE actions SET state='ready',token=NULL,last_error=?,next_run=?,updated=? WHERE id=?", (('support_job_failed: ' + reason).strip(': '),time.time()+30*action['attempts'],time.time(),action['id']))
+                    self.respond(200, {'accepted':True})
                 elif self.path in ('/plan','/failure','/handoff'):
                     with store.db() as db:
                         db.execute('BEGIN IMMEDIATE')
@@ -652,7 +945,8 @@ def application(store, runner, api_key):
                             return
                         if self.path == '/handoff':
                             # Dotcross heard "Ama Da Flow" in the message: rerun the job on the Ama Da Flow workflow instead.
-                            handoff = not ADF_PAUSED and not action['payload'].get('adf') and runner.adf_ok(runner.person(action), action['chat'])
+                            # Only on the Ama Da Flow number: the Dotcross number (session personal) never hands off.
+                            handoff = not ADF_PAUSED and not action['payload'].get('adf') and action['payload'].get('session', 'default') == 'default' and runner.adf_ok(runner.person(action), action['chat'])
                             if handoff:
                                 payload = {**action['payload'], 'adf': True}
                                 db.execute("UPDATE actions SET payload=?,state='extracting',token=NULL,next_run=?,updated=? WHERE id=?", (json.dumps(payload),time.time(),time.time(),action['id']))
@@ -666,6 +960,7 @@ def application(store, runner, api_key):
                             adf = action['payload'].get('adf') or ((body.get('plan') or {}).get('workspace') == 'adf' and runner.adf_ok(runner.person(action), action['chat']))
                             payload['listId'] = ADF_LIST_ID if adf else action['payload'].get('listId') or LIST_ID
                             payload['freeText'] = action['payload'].get('freeText') is True
+                            payload['session'] = action['payload'].get('session', 'default')
                             db.execute("UPDATE actions SET payload=?,kind=?,state='ready',token=NULL,attempts=0,next_run=?,updated=? WHERE id=?", (json.dumps(payload),payload['action'],time.time(),time.time(),action['id']))
                         else:
                             attempts=action['attempts']+1
@@ -706,6 +1001,8 @@ def main():
     groups = json.loads(Path(os.getenv('GROUPS_FILE','/app/groups.json')).read_text())
     if not all(re.fullmatch(r'[0-9-]{5,40}@g\.us',g) and re.fullmatch(r'\d{1,20}',str(l)) for g,l in groups.items()):
         raise SystemExit('groups.json must map <group>@g.us to a numeric ClickUp list ID')
+    if SUPPORT_GROUP and not re.fullmatch(r'[0-9-]{5,40}@g\.us', SUPPORT_GROUP):
+        raise SystemExit('SUPPORT_GROUP must be a <group>@g.us ID')
     store = Store(data / 'actions.sqlite3')
     api = API()
     runner = Runner(store,api,people,groups)
